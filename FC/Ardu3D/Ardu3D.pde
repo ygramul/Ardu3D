@@ -20,6 +20,7 @@
 #include <Shell.h>
 //#include <RcSuSiReceiver.h>
 #include <RcReceiver.h>
+#include <Kalman.h>
 
 typedef union
 {
@@ -35,11 +36,13 @@ typedef union
 } long_short_param_t;
 
 Shell shell;
-static itg_t * itg;
 ITG3200 itg3200;
 PID rollPid(1, 256);
 PID pitchPid(1, 256);
 PID yawPid(1, 256);
+Kalman rollKalman;
+Kalman pitchKalman;
+Kalman yawKalman;
 MCMixer mixer;
 RCTransform rcTransform;
 //RcSuSiReceiver receiver(RC_ROLL,RC_PITCH,RC_THROTTLE,RC_YAW,RC_AUX1,RC_AUX2,RC_CAMPITCH,RC_CAMROLL);
@@ -60,7 +63,8 @@ static long_short_param_t yaw_diff;
 static uint32_t currentTime;
 static uint32_t blctrlTime;
 static uint32_t serialTime;
-static uint32_t freeTime;
+static uint32_t currUsedTime;
+static uint32_t usedTime;
 
 static int16_t roll_filtered;
 static int16_t roll_action;
@@ -87,7 +91,7 @@ static int16_t transformed_pitch;
 
 /*********** BL-Ctrl I2C Adresses *******/
 uint8_t BLCTRL_I2C[4] = {
-  0x58, 0x54, 0x52, 0x56};//{0x52,0x54, 0x56, 0x58};
+  0x58, 0x54, 0x52, 0x56};
 
 static int16_t i2c_motor[4] = {
   0, 0, 0, 0};
@@ -143,21 +147,21 @@ void writeParameter() {
   EEPROM.write(p++,yaw_diff.low_param8);EEPROM.write(p++,yaw_diff.hi_param8);
   for(uint8_t i=0;i<4;i++)
     EEPROM.write(p++, pitch_value[i]);
-  shell.stop_active_function();
+  shell.stopActiveFunction();
   blinkLED(15,20,1);
 }
 
 void checkFirstTime() {
   if ( EEPROM.read(0) != config_version ) {
-    pitch_prop.para16 = 40;
+    pitch_prop.para16 = 60;
     pitch_int.para16 = 0;
-    pitch_diff.para16 = 20;
-    roll_prop.para16 = 40;
+    pitch_diff.para16 = 50;
+    roll_prop.para16 = 60;
     roll_int.para16 = 0;
-    roll_diff.para16 = 20;
-    yaw_prop.para16 = 20;
+    roll_diff.para16 = 50;
+    yaw_prop.para16 = 40;
     yaw_int.para16 = 0;
-    yaw_diff.para16 = 0;
+    yaw_diff.para16 = 30;
     for(uint8_t i=0;i<4;i++)
       pitch_value[i] = 127;
     writeParameter();
@@ -192,27 +196,28 @@ void blinkLED(uint8_t num, uint8_t wait,uint8_t repeat) {
 // *************************
 
 void initShell() {
-  shell.add_command("rP", "pid proportional of roll", &roll_prop.para16);
-  shell.add_command("rI", "pid integrational of roll", &roll_int.para16);
-  shell.add_command("rD", "pid differential of roll", &roll_diff.para16);
-  shell.add_command("pP", "pid proportional of pitch", &pitch_prop.para16);
-  shell.add_command("pI", "pid integrational of pitch", &pitch_int.para16);
-  shell.add_command("pD", "pid differential of pitch", &pitch_diff.para16 );
-  shell.add_command("yP", "pid proportional of yaw", &yaw_prop.para16);
-  shell.add_command("yI", "pid integrational of yaw", &yaw_int.para16);
-  shell.add_command("yD", "pid differential of yaw", &yaw_diff.para16);
-  shell.add_command("ser1", "pitch value for servo 1", &pitch_value[0]);
-  shell.add_command("ser2", "pitch value for servo 2", &pitch_value[1]);
-  shell.add_command("ser3", "pitch value for servo 3", &pitch_value[2]);
-  shell.add_command("ser4", "pitch value for servo 4", &pitch_value[3]);
-  shell.add_command("armed", "switch on/off motors, be carefull!", &armed);
-  shell.set_readwrite();
-  shell.add_command("save", "save parameters", writeParameter);
-  shell.add_command("gyro", "debug gyro sensor values", debugGyro);
-  shell.add_command("rc", "debug scaled rc stick values", debugRC);
-  shell.add_command("rawrc", "debug 'raw' rc stick values", debugRawRC);
-  shell.add_command("motor", "debug motor values", debugMotors);
-  shell.add_command("pid", "debug pid control action", debugPidAction);
+  shell.addCommand("rp", "pid proportional of roll", &roll_prop.para16);
+  shell.addCommand("ri", "pid integrational of roll", &roll_int.para16);
+  shell.addCommand("rd", "pid differential of roll", &roll_diff.para16);
+  shell.addCommand("pp", "pid proportional of pitch", &pitch_prop.para16);
+  shell.addCommand("pi", "pid integrational of pitch", &pitch_int.para16);
+  shell.addCommand("pd", "pid differential of pitch", &pitch_diff.para16);
+  shell.addCommand("yp", "pid proportional of yaw", &yaw_prop.para16);
+  shell.addCommand("yi", "pid integrational of yaw", &yaw_int.para16);
+  shell.addCommand("yd", "pid differential of yaw", &yaw_diff.para16);
+  
+  shell.addCommand("ser1", "pitch value for servo 1", &pitch_value[0]);
+  shell.addCommand("ser2", "pitch value for servo 2", &pitch_value[1]);
+  shell.addCommand("ser3", "pitch value for servo 3", &pitch_value[2]);
+  shell.addCommand("ser4", "pitch value for servo 4", &pitch_value[3]);
+  shell.addCommand("armed", "switch on/off motors, be carefull!", &armed);
+  shell.setReadwrite();
+  shell.addCommand("save", "save parameters", writeParameter);
+  shell.addCommand("gyro", "debug gyro sensor values", debugGyro);
+  shell.addCommand("rc", "debug scaled rc stick values", debugRC);
+  shell.addCommand("rawrc", "debug 'raw' rc stick values", debugRawRC);
+  shell.addCommand("motor", "debug motor values", debugMotors);
+  shell.addCommand("pid", "debug pid control action", debugPidAction);
 }
 
 void setParametersToPid() {
@@ -245,23 +250,28 @@ void setup() {
 
   Serial.println("Init itg callbacks");
   // make i2c access functions available to sensor methods
-  itg3200.i2c_start_callback(i2c_rep_start);
-  itg3200.i2c_write_callback(i2c_write);
-  itg3200.i2c_ack_callback(i2c_readAck);
-  itg3200.i2c_nack_callback(i2c_readNak);
+  itg3200.i2cStartCallback(i2c_rep_start);
+  itg3200.i2cWriteCallback(i2c_write);
+  itg3200.i2cAckCallback(i2c_readAck);
+  itg3200.i2cNackCallback(i2c_readNak);
   Serial.println("Init itg sensor");
   itg3200.init(); // init sensor. Set working values
   Serial.println("Calibrate gyro");
   // gyro_calibration(); // get deviation of sensor values
-  itg3200.calc_adc_offset();
+  itg3200.calcAdcOffset();
   
   Serial.println("load pid values");
   checkFirstTime();
   readParameters();
   setParametersToPid();
   
+  Serial.println("init Kalman filters");
+  rollKalman.init1D(0.0625, 4.0, 0.469725, 0.0);
+  pitchKalman.init1D(0.0625, 4.0, 0.469725, 0.0);
+  yawKalman.init1D(0.0625, 4.0, 0.469725, 0.0);
+  
   Serial.println("init motor mixer");
-  mixer.set_motor_range(IDLE_THROTTLE, MAX_THROTTLE);
+  mixer.setMotorRange(IDLE_THROTTLE, MAX_THROTTLE);
   
   Serial.println("configure receiver");
   stick_throttle = 0;
@@ -284,25 +294,24 @@ void setup() {
 void loop() {
   if (currentTime > (blctrlTime + 2000) ) { // 1000000 / 2000 = 500 Hz Refresh rate of i2c motor control
     blctrlTime = currentTime;
-    itg3200.read_adc();
-    itg = itg3200.get_itg_struct();
+    itg3200.readAdc();
     
     // adjust zero and do a low pass on sensor values
-    roll_filtered = itg3200.get_roll_calib() / 32;
-    pitch_filtered = - itg3200.get_pitch_calib() / 32;
-    yaw_filtered = - itg3200.get_yaw_calib() / 32;
+    roll_filtered = rollKalman.update1D(itg3200.getRollCalib() / 32);
+    pitch_filtered = - pitchKalman.update1D(itg3200.getPitchCalib() / 32);
+    yaw_filtered = - yawKalman.update1D(itg3200.getYawCalib() / 32);
     
-    pitch_action = pitchPid.calculate(transformed_pitch  * 4, pitch_filtered);
-    roll_action = rollPid.calculate(transformed_roll * 4, roll_filtered);
-    yaw_action = yawPid.calculate(stick_yaw * 4, yaw_filtered);
+    pitch_action = pitchPid.calculate(transformed_pitch, pitch_filtered);
+    roll_action = rollPid.calculate(transformed_roll, roll_filtered);
+    yaw_action = yawPid.calculate(stick_yaw * 6, yaw_filtered);
     
-    mixer.calc_axis2motors(stick_throttle, pitch_action, roll_action, yaw_action);
+    mixer.mixQuadP(stick_throttle, pitch_action, roll_action, yaw_action);
     
     if (armed) {
-      i2c_motor[0] = mixer.get_motor1();
-      i2c_motor[1] = mixer.get_motor2();
-      i2c_motor[2] = mixer.get_motor3();
-      i2c_motor[3] = mixer.get_motor4();
+      i2c_motor[0] = mixer.getMotor1();
+      i2c_motor[1] = mixer.getMotor2();
+      i2c_motor[2] = mixer.getMotor3();
+      i2c_motor[3] = mixer.getMotor4();
     } else {
       i2c_motor[0] = 0;
       i2c_motor[1] = 0;
@@ -318,8 +327,8 @@ void loop() {
           
     computeRC();
     
-    transformed_pitch = rcTransform.turn_rc_pitch(PCB_DIRECTION, stick_pitch, stick_roll);
-    transformed_roll = rcTransform.turn_rc_roll(PCB_DIRECTION, stick_pitch, stick_roll);
+    transformed_pitch = rcTransform.linToExp(rcTransform.turnRcPitch(PCB_DIRECTION, stick_pitch, stick_roll), 640);
+    transformed_roll = rcTransform.linToExp(rcTransform.turnRcRoll(PCB_DIRECTION, stick_pitch, stick_roll), 640);
 
     uint8_t c = 0;
     if (Serial.available() > 0) {
@@ -329,11 +338,14 @@ void loop() {
       }
       Serial.print(c);
     }  
-    shell.parse_command(c);
+    shell.parseCommand(c);
     setParametersToPid();
   }
+  currUsedTime = micros() - currentTime;
+  if (currUsedTime > usedTime) {
+    usedTime = currUsedTime;
+  }
   currentTime = micros();
-  freeTime = currentTime - blctrlTime;
 }
 
 // **************************
@@ -368,6 +380,10 @@ void debugGyro() {
     Serial.println(yaw_filtered);
 }
 
+void debugTansformedRC() {
+  Serial.print(transformed_pitch);
+}
+
 void debugRC() {
     armed ? Serial.print("on") : Serial.print("off");
     Serial.print('\t');
@@ -392,4 +408,11 @@ void debugRawRC() {
     Serial.print('\t');
     Serial.print(receiver.readScaledRC(RC_AUX1) > 125 ? 0 : 1, DEC);
     Serial.println();
+}
+
+void showUsedTime() {
+    Serial.print("Max used time in main loop: ");
+    Serial.println(usedTime);
+    Serial.println(" microseconds");
+    shell.stopActiveFunction();
 }
